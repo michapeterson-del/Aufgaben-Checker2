@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Gewohnheiten" />
+  <meta name="theme-color" content="#0d0d1a" />
+  <title>Meine Gewohnheiten</title>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { height: 100%; background: #0d0d1a; }
+    body { font-family: 'Outfit', sans-serif; color: #fff; overscroll-behavior: none; }
+    ::-webkit-scrollbar { width: 4px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.1); border-radius: 99px; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+    @keyframes pop { 0%,100% { transform: scale(1); } 50% { transform: scale(1.2); } }
+    .fade { animation: fadeIn 0.35s ease both; }
+    button { font-family: 'Outfit', sans-serif; }
+    input { font-family: 'Outfit', sans-serif; }
+    input::placeholder { color: rgba(255,255,255,0.25); }
+    .hover-dim:active { opacity: 0.7; }
+  </style>
+</head>
+<body>
+
+<div id="app" style="
+  min-height: 100vh;
+  background: linear-gradient(135deg, #0d0d1a 0%, #0f0a2e 50%, #0d1a1a 100%);
+  max-width: 480px;
+  margin: 0 auto;
+  padding-bottom: 100px;
+"></div>
+
+<script>
+// ─── STATE ───────────────────────────────────────────────────────────────────
+const STORAGE_KEY = 'habitTracker_html_v1';
+
+let state = {
+  tasks: [
+    { id: '1', name: 'Cello üben', emoji: '🎻', color: '#f97316' },
+    { id: '2', name: 'Zimmer aufräumen', emoji: '🧹', color: '#8b5cf6' },
+    { id: '3', name: 'Lernen', emoji: '📚', color: '#06b6d4' },
+  ],
+  completions: {},
+  view: 'week',
+  weekOffset: 0,
+  monthOffset: 0,
+  activeTab: 'tracker',
+  modal: null, // null | 'add' | {task}
+  form: { name: '', emoji: '⭐', color: '#6366f1' },
+};
+
+function load() {
+  try {
+    const s = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null');
+    if (s) {
+      if (s.tasks) state.tasks = s.tasks;
+      if (s.completions) state.completions = s.completions;
+    }
+  } catch {}
+}
+
+function save() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ tasks: state.tasks, completions: state.completions }));
+  } catch {}
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function todayStr() { return new Date().toISOString().split('T')[0]; }
+
+function getWeekDays(offset = 0) {
+  const today = new Date();
+  const mon = new Date(today);
+  mon.setDate(today.getDate() - ((today.getDay() + 6) % 7) + offset * 7);
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(mon); d.setDate(mon.getDate() + i);
+    return d.toISOString().split('T')[0];
+  });
+}
+
+function getMonthDays(year, month) {
+  const days = []; const d = new Date(year, month, 1);
+  while (d.getMonth() === month) { days.push(d.toISOString().split('T')[0]); d.setDate(d.getDate() + 1); }
+  return days;
+}
+
+function fmtDate(dateStr, short = false) {
+  const d = new Date(dateStr + 'T12:00:00');
+  if (short) return d.toLocaleDateString('de-DE', { weekday: 'short' }).slice(0, 2);
+  return d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric' });
+}
+
+function getStreak(taskId) {
+  let streak = 0;
+  const t = new Date();
+  for (let i = 0; i < 365; i++) {
+    const d = new Date(t); d.setDate(t.getDate() - i);
+    const k = d.toISOString().split('T')[0];
+    if (state.completions[k]?.[taskId]) streak++; else break;
+  }
+  return streak;
+}
+
+function calcStats() {
+  const allDays = Object.keys(state.completions);
+  return state.tasks.map(task => {
+    const done = allDays.filter(d => state.completions[d]?.[task.id]).length;
+    const total = allDays.length;
+    const streak = getStreak(task.id);
+    const pct = total > 0 ? Math.round(done / total * 100) : 0;
+    return { ...task, done, total, streak, pct };
+  });
+}
+
+function getPerfectDays() {
+  return Object.keys(state.completions).filter(day =>
+    state.tasks.every(t => state.completions[day]?.[t.id])
+  ).length;
+}
+
+function getMostForgotten() {
+  const s = calcStats().sort((a, b) => a.pct - b.pct);
+  return s[0];
+}
+
+// ─── ACTIONS ─────────────────────────────────────────────────────────────────
+function toggle(taskId, dateStr) {
+  if (!state.completions[dateStr]) state.completions[dateStr] = {};
+  state.completions[dateStr][taskId] = !state.completions[dateStr][taskId];
+  save(); render();
+}
+
+function addTask() {
+  const name = state.form.name.trim();
+  if (!name) return;
+  state.tasks.push({ id: Date.now().toString(), name, emoji: state.form.emoji, color: state.form.color });
+  state.modal = null;
+  save(); render();
+}
+
+function saveEdit() {
+  const name = state.form.name.trim();
+  if (!name) return;
+  state.tasks = state.tasks.map(t => t.id === state.modal.id
+    ? { ...t, name, emoji: state.form.emoji, color: state.form.color } : t);
+  state.modal = null;
+  save(); render();
+}
+
+function deleteTask(id) {
+  state.tasks = state.tasks.filter(t => t.id !== id);
+  state.modal = null;
+  save(); render();
+}
+
+// ─── RENDER ──────────────────────────────────────────────────────────────────
+const EMOJIS = ['⭐','🎯','💪','📚','🎻','🧹','🏃','🍎','💻','✍️','🧘','🎨','🎮','🌿','🔥','💡','🎵','🤸','🛌','🚿'];
+const COLORS = ['#6366f1','#f97316','#06b6d4','#8b5cf6','#22c55e','#ec4899','#f59e0b','#ef4444','#10b981','#3b82f6'];
+
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'style' && typeof v === 'object') Object.assign(e.style, v);
+    else if (k.startsWith('on')) e[k.toLowerCase()] = v;
+    else e.setAttribute(k, v);
+  }
+  for (const c of children.flat()) {
+    if (c == null) continue;
+    e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+
+function statBar(pct, color) {
+  return el('div', { style: { background: 'rgba(255,255,255,0.06)', borderRadius: '99px', height: '8px', overflow: 'hidden', flex: 1 } },
+    el('div', { style: { height: '100%', width: pct + '%', background: color, borderRadius: '99px', boxShadow: `0 0 8px ${color}88`, transition: 'width 0.6s ease' } })
+  );
+}
+
+function renderModal() {
+  const isEdit = state.modal && typeof state.modal === 'object' && state.modal.id;
+
+  const overlay = el('div', {
+    style: {
+      position: 'fixed', inset: '0', background: 'rgba(0,0,0,0.75)', zIndex: '100',
+      display: 'flex', alignItems: 'flex-end', justifyContent: 'center',
+      backdropFilter: 'blur(6px)',
+    },
+    onclick: (e) => { if (e.target === overlay) { state.modal = null; render(); } }
+  });
+
+  const sheet = el('div', {
+    style: {
+      background: '#1a1a2e', borderRadius: '20px 20px 0 0', padding: '28px 20px 44px',
+      width: '100%', maxWidth: '480px',
+    }
+  });
+
+  sheet.appendChild(el('h3', { style: { color: '#fff', marginBottom: '20px', fontSize: '18px' } }, isEdit ? 'Aufgabe bearbeiten' : 'Neue Aufgabe'));
+
+  const inp = el('input', {
+    type: 'text', placeholder: 'Name der Aufgabe…', value: state.form.name,
+    style: {
+      width: '100%', padding: '12px 16px', borderRadius: '12px',
+      border: '1.5px solid rgba(255,255,255,0.12)', background: 'rgba(255,255,255,0.06)',
+      color: '#fff', fontSize: '16px', outline: 'none', marginBottom: '16px', display: 'block',
+    },
+    oninput: (e) => { state.form.name = e.target.value; }
+  });
+  inp.onkeydown = (e) => { if (e.key === 'Enter') isEdit ? saveEdit() : addTask(); };
+  sheet.appendChild(inp);
+
+  sheet.appendChild(el('p', { style: { color: 'rgba(255,255,255,0.4)', fontSize: '12px', marginBottom: '8px' } }, 'Emoji'));
+  const emojiRow = el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' } });
+  EMOJIS.forEach(em => {
+    const btn = el('button', {
+      style: {
+        width: '40px', height: '40px', borderRadius: '10px', fontSize: '20px', cursor: 'pointer',
+        background: state.form.emoji === em ? 'rgba(255,255,255,0.18)' : 'rgba(255,255,255,0.06)',
+        border: state.form.emoji === em ? '2px solid rgba(255,255,255,0.4)' : '2px solid transparent',
+      },
+      onclick: () => { state.form.emoji = em; renderModal(); sheet.querySelectorAll('input')[0].value = state.form.name; }
+    }, em);
+    emojiRow.appendChild(btn);
+  });
+  sheet.appendChild(emojiRow);
+
+  sheet.appendChild(el('p', { style: { color: 'rgba(255,255,255,0.4)', fontSize: '12px', marginBottom: '8px' } }, 'Farbe'));
+  const colorRow = el('div', { style: { display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '24px' } });
+  COLORS.forEach(col => {
+    colorRow.appendChild(el('button', {
+      style: {
+        width: '32px', height: '32px', borderRadius: '99px', background: col, cursor: 'pointer',
+        border: state.form.color === col ? '3px solid #fff' : '3px solid transparent',
+        boxShadow: state.form.color === col ? `0 0 10px ${col}` : 'none',
+      },
+      onclick: () => { state.form.color = col; renderModal(); sheet.querySelectorAll('input')[0].value = state.form.name; }
+    }));
+  });
+  sheet.appendChild(colorRow);
+
+  const btnRow = el('div', { style: { display: 'flex', gap: '10px' } });
+  if (isEdit) {
+    btnRow.appendChild(el('button', {
+      style: { flex: '1', padding: '13px 0', borderRadius: '12px', border: 'none', background: 'rgba(239,68,68,0.18)', color: '#ef4444', fontSize: '15px', cursor: 'pointer' },
+      onclick: () => deleteTask(state.modal.id)
+    }, 'Löschen'));
+  }
+  btnRow.appendChild(el('button', {
+    style: { flex: '2', padding: '13px 0', borderRadius: '12px', border: 'none', background: state.form.color, color: '#fff', fontSize: '15px', fontWeight: '600', cursor: 'pointer', boxShadow: `0 4px 20px ${state.form.color}66` },
+    onclick: () => isEdit ? saveEdit() : addTask()
+  }, isEdit ? 'Speichern' : 'Hinzufügen'));
+  sheet.appendChild(btnRow);
+
+  overlay.appendChild(sheet);
+  return overlay;
+}
+
+function render() {
+  const app = document.getElementById('app');
+  app.innerHTML = '';
+
+  const today = todayStr();
+  const now = new Date();
+  const monthDate = new Date(now.getFullYear(), now.getMonth() + state.monthOffset, 1);
+  const weekDays = getWeekDays(state.weekOffset);
+  const monthDays = getMonthDays(monthDate.getFullYear(), monthDate.getMonth());
+  const stats = calcStats();
+  const perfectDays = getPerfectDays();
+  const forgotten = getMostForgotten();
+  const maxStreak = Math.max(0, ...stats.map(s => s.streak));
+
+  // ── HEADER ──
+  const header = el('div', { style: { padding: '28px 20px 0', animation: 'fadeIn 0.4s ease' } });
+
+  const hTop = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: '20px' } });
+  const hLeft = el('div', {});
+  hLeft.appendChild(el('p', { style: { fontSize: '12px', color: 'rgba(255,255,255,0.35)', letterSpacing: '2px', textTransform: 'uppercase', marginBottom: '4px' } },
+    now.toLocaleDateString('de-DE', { weekday: 'long' }) + ', ' + now.toLocaleDateString('de-DE', { day: 'numeric', month: 'long' })));
+  const h1 = el('h1', { style: { fontSize: '28px', fontWeight: '800' } }, 'Meine Gewohnheiten');
+  h1.style.background = 'linear-gradient(135deg, #fff 0%, rgba(255,255,255,0.55) 100%)';
+  h1.style.webkitBackgroundClip = 'text';
+  h1.style.webkitTextFillColor = 'transparent';
+  hLeft.appendChild(h1);
+  hTop.appendChild(hLeft);
+
+  hTop.appendChild(el('button', {
+    style: { width: '44px', height: '44px', borderRadius: '14px', background: 'rgba(255,255,255,0.08)', border: '1.5px solid rgba(255,255,255,0.12)', color: '#fff', fontSize: '24px', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' },
+    onclick: () => { state.modal = 'add'; state.form = { name: '', emoji: '⭐', color: '#6366f1' }; render(); }
+  }, '+'));
+  header.appendChild(hTop);
+
+  // Quick stats
+  const qrow = el('div', { style: { display: 'flex', gap: '10px' } });
+  [
+    { icon: '🏆', label: 'Perfekte Tage', val: perfectDays },
+    { icon: '📋', label: 'Aufgaben', val: state.tasks.length },
+    { icon: '🔥', label: 'Top Streak', val: maxStreak + ' Tage' },
+  ].forEach((s, i) => {
+    const c = el('div', { style: { flex: '1', background: 'rgba(255,255,255,0.05)', borderRadius: '14px', padding: '12px 10px', border: '1px solid rgba(255,255,255,0.07)', animation: `fadeIn 0.5s ease ${i * 0.08}s both` } });
+    c.appendChild(el('div', { style: { fontSize: '20px', marginBottom: '4px' } }, s.icon));
+    c.appendChild(el('div', { style: { fontSize: '18px', fontWeight: '700', color: '#fff' } }, String(s.val)));
+    c.appendChild(el('div', { style: { fontSize: '10px', color: 'rgba(255,255,255,0.35)', marginTop: '2px' } }, s.label));
+    qrow.appendChild(c);
+  });
+  header.appendChild(qrow);
+  app.appendChild(header);
+
+  // ── TABS ──
+  const tabBar = el('div', { style: { display: 'flex', gap: '8px', padding: '16px 20px 0' } });
+  [['tracker', '📅 Tracker'], ['stats', '📊 Statistik']].forEach(([key, label]) => {
+    const active = state.activeTab === key;
+    tabBar.appendChild(el('button', {
+      style: { flex: '1', padding: '10px 0', borderRadius: '12px', background: active ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.04)', border: active ? '1.5px solid rgba(255,255,255,0.18)' : '1.5px solid transparent', color: active ? '#fff' : 'rgba(255,255,255,0.4)', fontSize: '13px', fontWeight: '600', cursor: 'pointer' },
+      onclick: () => { state.activeTab = key; render(); }
+    }, label));
+  });
+  app.appendChild(tabBar);
+
+  const content = el('div', { style: { padding: '16px 20px', animation: 'fadeIn 0.3s ease' } });
+
+  // ── TRACKER TAB ──
+  if (state.activeTab === 'tracker') {
+    // View toggle + nav
+    const ctrlRow = el('div', { style: { display: 'flex', gap: '8px', marginBottom: '16px', alignItems: 'center' } });
+    ['week', 'month'].forEach(v => {
+      const active = state.view === v;
+      ctrlRow.appendChild(el('button', {
+        style: { padding: '7px 16px', borderRadius: '99px', fontSize: '12px', fontWeight: '600', cursor: 'pointer', background: active ? 'rgba(255,255,255,0.15)' : 'transparent', border: active ? '1.5px solid rgba(255,255,255,0.2)' : '1.5px solid rgba(255,255,255,0.08)', color: active ? '#fff' : 'rgba(255,255,255,0.4)' },
+        onclick: () => { state.view = v; render(); }
+      }, v === 'week' ? 'Woche' : 'Monat'));
+    });
+    ctrlRow.appendChild(el('div', { style: { flex: '1' } }));
+    [-1, 1].forEach(dir => {
+      ctrlRow.appendChild(el('button', {
+        style: { width: '34px', height: '34px', borderRadius: '10px', background: 'rgba(255,255,255,0.06)', border: '1.5px solid rgba(255,255,255,0.1)', color: 'rgba(255,255,255,0.6)', fontSize: '16px', cursor: 'pointer' },
+        onclick: () => { if (state.view === 'week') state.weekOffset += dir; else state.monthOffset += dir; render(); }
+      }, dir === -1 ? '‹' : '›'));
+    });
+    content.appendChild(ctrlRow);
+
+    // Period label
+    content.appendChild(el('p', { style: { fontSize: '12px', color: 'rgba(255,255,255,0.35)', marginBottom: '14px', letterSpacing: '0.5px' } },
+      state.view === 'week'
+        ? `${fmtDate(weekDays[0])} – ${fmtDate(weekDays[6])}`
+        : monthDate.toLocaleDateString('de-DE', { month: 'long', year: 'numeric' })
+    ));
+
+    if (state.view === 'week') {
+      // Header row
+      const hrow = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr repeat(7, 36px)', gap: '6px', marginBottom: '8px' } });
+      hrow.appendChild(el('div', {}));
+      weekDays.forEach(d => {
+        hrow.appendChild(el('div', {
+          style: { textAlign: 'center', fontSize: '11px', fontWeight: '600', color: d === today ? '#fbbf24' : 'rgba(255,255,255,0.35)', background: d === today ? 'rgba(251,191,36,0.1)' : 'transparent', borderRadius: '6px', padding: '3px 0' }
+        }, fmtDate(d, true)));
+      });
+      content.appendChild(hrow);
+
+      if (state.tasks.length === 0) {
+        const empty = el('div', { style: { textAlign: 'center', padding: '40px 0', color: 'rgba(255,255,255,0.25)' } });
+        empty.appendChild(el('div', { style: { fontSize: '40px', marginBottom: '12px' } }, '🌱'));
+        empty.appendChild(el('p', {}, 'Noch keine Aufgaben. Tippe auf + !'));
+        content.appendChild(empty);
+      }
+
+      state.tasks.forEach((task, ti) => {
+        const row = el('div', {
+          style: { display: 'grid', gridTemplateColumns: '1fr repeat(7, 36px)', gap: '6px', alignItems: 'center', marginBottom: '10px', animation: `fadeIn 0.4s ease ${ti * 0.06}s both` }
+        });
+
+        const nameBtn = el('button', {
+          style: { display: 'flex', alignItems: 'center', gap: '8px', background: 'none', border: 'none', cursor: 'pointer', textAlign: 'left', padding: '6px 0', overflow: 'hidden' },
+          onclick: () => { state.modal = task; state.form = { name: task.name, emoji: task.emoji, color: task.color }; render(); }
+        });
+        nameBtn.appendChild(el('span', { style: { fontSize: '18px', flexShrink: '0' } }, task.emoji));
+        nameBtn.appendChild(el('span', { style: { fontSize: '13px', fontWeight: '500', color: 'rgba(255,255,255,0.85)', lineHeight: '1.2', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' } }, task.name));
+        row.appendChild(nameBtn);
+
+        weekDays.forEach(d => {
+          const done = !!(state.completions[d]?.[task.id]);
+          const isToday = d === today;
+          const btn = el('button', {
+            style: {
+              width: '36px', height: '36px', borderRadius: '10px', border: done ? 'none' : '2px solid rgba(255,255,255,0.12)',
+              background: done ? 'rgba(34,197,94,0.85)' : 'rgba(255,255,255,0.04)', cursor: 'pointer',
+              fontSize: '16px', color: '#fff', transition: 'all 0.15s', flexShrink: '0',
+              outline: isToday ? '2px solid rgba(251,191,36,0.5)' : 'none', outlineOffset: '2px',
+              boxShadow: done ? '0 0 12px rgba(34,197,94,0.4)' : 'none',
+            },
+            onclick: () => toggle(task.id, d)
+          }, done ? '✓' : '');
+          row.appendChild(btn);
+        });
+        content.appendChild(row);
+      });
+
+    } else {
+      // MONTH VIEW
+      state.tasks.forEach((task, ti) => {
+        const doneDays = monthDays.filter(d => state.completions[d]?.[task.id]).length;
+        const pct = Math.round(doneDays / monthDays.length * 100);
+
+        const card = el('div', {
+          style: { background: 'rgba(255,255,255,0.04)', borderRadius: '16px', padding: '14px', marginBottom: '12px', border: '1px solid rgba(255,255,255,0.07)', animation: `fadeIn 0.4s ease ${ti * 0.07}s both` }
+        });
+
+        const cardTop = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' } });
+        const editBtn = el('button', { style: { display: 'flex', alignItems: 'center', gap: '8px', background: 'none', border: 'none', cursor: 'pointer' },
+          onclick: () => { state.modal = task; state.form = { name: task.name, emoji: task.emoji, color: task.color }; render(); } });
+        editBtn.appendChild(el('span', { style: { fontSize: '18px' } }, task.emoji));
+        editBtn.appendChild(el('span', { style: { fontSize: '14px', fontWeight: '600', color: '#fff' } }, task.name));
+        cardTop.appendChild(editBtn);
+        cardTop.appendChild(el('span', { style: { fontSize: '13px', fontWeight: '700', color: task.color } }, pct + '%'));
+        card.appendChild(cardTop);
+
+        const grid = el('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(7, 1fr)', gap: '4px', marginBottom: '10px' } });
+        ['Mo','Di','Mi','Do','Fr','Sa','So'].forEach(d => {
+          grid.appendChild(el('div', { style: { textAlign: 'center', fontSize: '9px', color: 'rgba(255,255,255,0.25)', paddingBottom: '2px' } }, d));
+        });
+        // Offset
+        const firstDow = (new Date(monthDate.getFullYear(), monthDate.getMonth(), 1).getDay() + 6) % 7;
+        for (let i = 0; i < firstDow; i++) grid.appendChild(el('div', {}));
+
+        monthDays.forEach(d => {
+          const done = !!(state.completions[d]?.[task.id]);
+          const isToday = d === today;
+          const dayNum = new Date(d + 'T12:00:00').getDate();
+          const btn = el('button', {
+            style: {
+              aspectRatio: '1', borderRadius: '6px', border: 'none', cursor: 'pointer',
+              background: done ? task.color : isToday ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.04)',
+              fontSize: '10px', color: done ? '#fff' : 'rgba(255,255,255,0.3)', fontWeight: done ? '700' : '400',
+              outline: isToday ? `2px solid ${task.color}88` : 'none', outlineOffset: '1px',
+              boxShadow: done ? `0 0 8px ${task.color}66` : 'none', transition: 'all 0.15s',
+            },
+            onclick: () => toggle(task.id, d)
+          }, String(dayNum));
+          grid.appendChild(btn);
+        });
+        card.appendChild(grid);
+
+        const barRow = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } });
+        barRow.appendChild(statBar(pct, task.color));
+        barRow.appendChild(el('span', { style: { fontSize: '11px', color: 'rgba(255,255,255,0.35)', whiteSpace: 'nowrap' } }, `${doneDays}/${monthDays.length} Tage`));
+        card.appendChild(barRow);
+
+        content.appendChild(card);
+      });
+    }
+  }
+
+  // ── STATS TAB ──
+  if (state.activeTab === 'stats') {
+    const grid2 = el('div', { style: { display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '20px' } });
+    [
+      { icon: '🏆', label: 'Perfekte Tage', val: perfectDays },
+      { icon: '😬', label: 'Oft vergessen', val: forgotten ? `${forgotten.emoji} ${forgotten.pct}%` : '–' },
+      { icon: '📅', label: 'Verfolgte Tage', val: Object.keys(state.completions).length },
+      { icon: '✅', label: 'Aufgaben', val: state.tasks.length },
+    ].forEach((c, i) => {
+      const card = el('div', { style: { background: 'rgba(255,255,255,0.05)', borderRadius: '16px', padding: '16px', border: '1px solid rgba(255,255,255,0.07)', animation: `fadeIn 0.4s ease ${i * 0.07}s both` } });
+      card.appendChild(el('div', { style: { fontSize: '24px', marginBottom: '6px' } }, c.icon));
+      card.appendChild(el('div', { style: { fontSize: '20px', fontWeight: '800', color: '#fff' } }, String(c.val)));
+      card.appendChild(el('div', { style: { fontSize: '11px', color: 'rgba(255,255,255,0.35)', marginTop: '2px' } }, c.label));
+      grid2.appendChild(card);
+    });
+    content.appendChild(grid2);
+
+    content.appendChild(el('h2', { style: { fontSize: '13px', fontWeight: '700', color: 'rgba(255,255,255,0.4)', letterSpacing: '1.5px', textTransform: 'uppercase', marginBottom: '12px' } }, 'Pro Aufgabe'));
+
+    if (stats.length === 0) {
+      const e = el('div', { style: { textAlign: 'center', padding: '40px 0', color: 'rgba(255,255,255,0.25)' } });
+      e.appendChild(el('div', { style: { fontSize: '40px', marginBottom: '12px' } }, '📊'));
+      e.appendChild(el('p', {}, 'Noch keine Daten.'));
+      content.appendChild(e);
+    }
+
+    stats.forEach((s, i) => {
+      const card = el('div', { style: { background: 'rgba(255,255,255,0.04)', borderRadius: '16px', padding: '16px', marginBottom: '10px', border: '1px solid rgba(255,255,255,0.07)', animation: `fadeIn 0.4s ease ${i * 0.07}s both` } });
+      const top = el('div', { style: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' } });
+      const left = el('div', { style: { display: 'flex', alignItems: 'center', gap: '8px' } });
+      left.appendChild(el('span', { style: { fontSize: '20px' } }, s.emoji));
+      left.appendChild(el('span', { style: { fontSize: '14px', fontWeight: '600', color: '#fff' } }, s.name));
+      top.appendChild(left);
+      const pctEl = el('span', { style: { fontSize: '20px', fontWeight: '800', color: s.color } }, s.pct + '%');
+      pctEl.style.textShadow = `0 0 12px ${s.color}88`;
+      top.appendChild(pctEl);
+      card.appendChild(top);
+      card.appendChild(statBar(s.pct, s.color));
+
+      const mrow = el('div', { style: { display: 'flex', gap: '10px', marginTop: '10px' } });
+      [
+        { icon: '✅', label: 'Erledigt', val: s.done },
+        { icon: '❌', label: 'Verpasst', val: s.total - s.done },
+        { icon: '🔥', label: 'Streak', val: s.streak + 'd' },
+      ].forEach(m => {
+        const mc = el('div', { style: { flex: '1', background: 'rgba(255,255,255,0.04)', borderRadius: '10px', padding: '8px 6px', textAlign: 'center' } });
+        mc.appendChild(el('div', { style: { fontSize: '14px' } }, m.icon));
+        mc.appendChild(el('div', { style: { fontSize: '16px', fontWeight: '700', color: '#fff', marginTop: '2px' } }, String(m.val)));
+        mc.appendChild(el('div', { style: { fontSize: '10px', color: 'rgba(255,255,255,0.3)' } }, m.label));
+        mrow.appendChild(mc);
+      });
+      card.appendChild(mrow);
+      content.appendChild(card);
+    });
+  }
+
+  app.appendChild(content);
+
+  // Modal
+  if (state.modal) app.appendChild(renderModal());
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+load();
+render();
+</script>
+</body>
+</html>
